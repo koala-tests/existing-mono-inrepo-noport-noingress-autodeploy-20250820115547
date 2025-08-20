@@ -1,0 +1,72 @@
+name: Build Go binary
+description: Build Go binary and optionally build docker image (depending on args to goreleaser)
+inputs:
+  goreleaser_args:
+    description: "Arguments to pass to GoReleaser"
+    required: false
+    default: "build --clean --single-target --snapshot"
+  token:
+    description: "A GitHub token for access to private repositories"
+    required: false
+  service_dir:
+    description: "The directory of the service"
+    required: false
+    default: "."
+  working_directory:
+    description: 'Working directory where the code is located'
+    required: false
+    default: '.'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: "1.22"
+    - name: Give GitHub Actions access to private repositories
+      if: ${{ inputs.token != '' }}
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ inputs.token }}
+    - run: git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
+      if: ${{ inputs.token != '' }}
+      shell: bash
+    - name: Determine working directory for GoReleaser
+      id: workdir
+      shell: bash
+      run: |
+        echo "Debug: service_dir = ${{ inputs.service_dir }}"
+        echo "Debug: working_directory = ${{ inputs.working_directory }}"
+        echo "Debug: Checking if code/services exists..."
+        ls -la ${{ inputs.working_directory }}/
+        
+        if [ "${{ inputs.service_dir }}" = "." ] && [ -d "${{ inputs.working_directory }}/services" ]; then
+          echo "Debug: This is a monorepo, checking if build files are in root..."
+          # For monorepos, build files (main.go, goreleaser.yml) are in the root
+          if [ -f "${{ inputs.working_directory }}/main.go" ] && [ -f "${{ inputs.working_directory }}/goreleaser.yml" ]; then
+            echo "Debug: Found build files in root directory, using: ${{ inputs.working_directory }}"
+            echo "workdir=${{ inputs.working_directory }}" >> $GITHUB_OUTPUT
+          else
+            echo "Debug: Build files not found in root, checking services subdirectories..."
+            # Fallback: check if there are build files in services subdirectories
+            for dir in ${{ inputs.working_directory }}/services/*/; do
+              echo "Debug: Checking directory: $dir"
+              if [ -f "$dir/main.go" ] && [ -f "$dir/goreleaser.yml" ]; then
+                echo "Debug: Found service directory with main.go and goreleaser.yml: $dir"
+                echo "workdir=$dir" >> $GITHUB_OUTPUT
+                break
+              fi
+            done
+          fi
+        else
+          echo "Debug: Not a monorepo or service_dir != '.', using: ${{ inputs.working_directory }}/${{ inputs.service_dir }}"
+          echo "workdir=${{ inputs.working_directory }}/${{ inputs.service_dir }}" >> $GITHUB_OUTPUT
+        fi
+        
+        echo "Debug: Final workdir = ${{ steps.workdir.outputs.workdir }}"
+    - name: GoReleaser release Action (build Docker image)
+      uses: goreleaser/goreleaser-action@v5
+      with:
+        workdir: ${{ steps.workdir.outputs.workdir }}
+        args: ${{ inputs.goreleaser_args }}
